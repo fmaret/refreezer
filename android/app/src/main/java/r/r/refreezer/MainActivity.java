@@ -49,7 +49,6 @@ public class MainActivity extends AudioServiceActivity {
     Messenger serviceMessenger;
     Messenger activityMessenger;
     SQLiteDatabase db;
-    StreamServer streamServer;
 
     //Data if started from intent
     String intentPreload;
@@ -191,18 +190,16 @@ public class MainActivity extends AudioServiceActivity {
             }
             //Start streaming server
             if (call.method.equals("startServer")) {
-                if (streamServer == null) {
-                    //Get offline path
-                    String offlinePath = getExternalFilesDir("offline").getAbsolutePath();
-                    //Start server
-                    streamServer = new StreamServer(call.argument("arl"), offlinePath);
-                    streamServer.start();
-                }
+                //Get offline path
+                String offlinePath = getExternalFilesDir("offline").getAbsolutePath();
+                //Start server (no-op if already started, e.g. by Application)
+                StreamServerHolder.ensureStarted(call.argument("arl"), offlinePath);
                 result.success(null);
                 return;
             }
             //Get quality info from stream
             if (call.method.equals("getStreamInfo")) {
+                StreamServer streamServer = StreamServerHolder.get();
                 if (streamServer == null) {
                     result.success(null);
                     return;
@@ -218,10 +215,7 @@ public class MainActivity extends AudioServiceActivity {
             if (call.method.equals("kill")) {
                 Intent intent = new Intent(this, DownloadService.class);
                 stopService(intent);
-                if (streamServer != null) {
-                    streamServer.stop();
-                    streamServer = null;
-                }
+                StreamServerHolder.stop();
                 //System.exit(0);
                 result.success(null);
                 return;
@@ -305,9 +299,8 @@ public class MainActivity extends AudioServiceActivity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
-        //Stop server
-        if (streamServer != null)
-            streamServer.stop();
+        //The stream server is owned by StreamServerHolder and lives as long as the
+        //process: Android Auto / the media service may still need it without any activity.
 
         //Unbind service on exit
         if (serviceBound) {
