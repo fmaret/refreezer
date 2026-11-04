@@ -35,7 +35,11 @@ Future<AudioPlayerHandler> initAudioService() async {
         androidStopForegroundOnPause: true,
         androidNotificationClickStartsActivity: true,
         androidNotificationChannelDescription: 'ReFreezer',
-        androidNotificationIcon: 'drawable/ic_logo'),
+        androidNotificationIcon: 'drawable/ic_logo',
+        // Show the search button (with voice input) in Android Auto
+        androidBrowsableRootExtras: {
+          'android.media.browse.SEARCH_SUPPORTED': true
+        }),
   );
 }
 
@@ -234,6 +238,10 @@ class AudioPlayerHandler extends BaseAudioHandler
 
     //Scrobble to LastFM
     MediaItem? newMediaItem = mediaItem.value;
+    // Use the untouched item: the published one may carry a lyric line as title/artist
+    if (_carBaseItem != null && _carBaseItem!.id == newMediaItem?.id) {
+      newMediaItem = _carBaseItem;
+    }
     if (newMediaItem != null && newMediaItem.id != _loggedTrackId) {
       // Add to history if new track
       _addToHistory(newMediaItem);
@@ -261,6 +269,83 @@ class AudioPlayerHandler extends BaseAudioHandler
     } else {
       Logger.root.severe('playFromMediaId: MediaItem not found');
     }
+  }
+
+  // Last results shown by the Android Auto search screen, so that tapping one can start the list
+  List<Track> _searchTracks = [];
+
+  /// Voice search from Android Auto / Google Assistant ("play X on Flowzer").
+  /// Plays an exact album match, otherwise the best matching tracks, otherwise
+  /// the best matching playlist. An empty query ("play some music") starts Flow.
+  @override
+  Future<void> playFromSearch(String query, [Map<String, dynamic>? extras]) async {
+    final q = query.trim();
+    try {
+      if (q.isEmpty) {
+        await _androidAuto.playItem('${AndroidAuto.prefix}flow');
+        return;
+      }
+      final results = await deezerAPI.search(q);
+
+      // Exact album title match ("play the album X")
+      final albums = results.albums ?? [];
+      final exactAlbum = albums.where(
+          (a) => (a.title ?? '').trim().toLowerCase() == q.toLowerCase());
+      if (exactAlbum.isNotEmpty) {
+        final album = await deezerAPI.album(exactAlbum.first.id ?? '');
+        if ((album.tracks?.length ?? 0) > 0) {
+          await playFromAlbum(album, album.tracks![0].id ?? '');
+          return;
+        }
+      }
+
+      final tracks = (results.tracks ?? []).take(30).toList();
+      if (tracks.isNotEmpty) {
+        await playFromTrackList(tracks, tracks.first.id ?? '',
+            QueueSource(id: q, text: q, source: 'search'));
+        return;
+      }
+
+      final playlists = results.playlists ?? [];
+      if (playlists.isNotEmpty) {
+        final playlist = await deezerAPI.fullPlaylist(playlists.first.id ?? '');
+        if ((playlist.tracks?.length ?? 0) > 0) {
+          await playFromPlaylist(playlist, playlist.tracks![0].id ?? '');
+          return;
+        }
+      }
+      Logger.root.info('Voice search "$q": no results');
+      Fluttertoast.showToast(
+          msg: 'No results'.i18n, gravity: ToastGravity.BOTTOM);
+    } catch (e, st) {
+      Logger.root.severe('Voice search "$q" failed', e, st);
+    }
+  }
+
+  /// Search screen of Android Auto (search button with voice input).
+  @override
+  Future<List<MediaItem>> search(String query, [Map<String, dynamic>? extras]) async {
+    final q = query.trim();
+    if (q.isEmpty) return [];
+    try {
+      final results = await deezerAPI.search(q);
+      _searchTracks = (results.tracks ?? []).take(30).toList();
+      return _searchTracks
+          .map<MediaItem>((t) => t
+              .toMediaItem()
+              .copyWith(id: '${AndroidAuto.prefix}strk${t.id}', playable: true))
+          .toList();
+    } catch (e, st) {
+      Logger.root.severe('Android Auto search "$q" failed', e, st);
+      return [];
+    }
+  }
+
+  /// Start the last search results at the given track.
+  Future<void> playFromSearchResult(String trackId) async {
+    if (_searchTracks.isEmpty) return;
+    await playFromTrackList(_searchTracks, trackId,
+        QueueSource(id: 'search', text: 'Search'.i18n, source: 'search'));
   }
 
   @override
@@ -460,6 +545,7 @@ class AudioPlayerHandler extends BaseAudioHandler
   }
 
   static const String _toggleFavoriteAction = 'toggleFavorite';
+  static const String _toggleKaraokeAction = 'toggleCarKaraoke';
 
   List<MediaControl> _buildControls(bool playing) {
     final item = mediaItem.value;
@@ -476,6 +562,14 @@ class AudioPlayerHandler extends BaseAudioHandler
               : 'drawable/ic_favorite_border',
           label: isFavorite ? 'Unlove'.i18n : 'Love'.i18n,
           name: _toggleFavoriteAction),
+      // Karaoke: put the lyric line in the (bigger) title slot on the car display
+      if (settings.carLyrics)
+        MediaControl.custom(
+            androidIcon: _carKaraoke
+                ? 'drawable/ic_karaoke_on'
+                : 'drawable/ic_karaoke_off',
+            label: 'Karaoke mode'.i18n,
+            name: _toggleKaraokeAction),
       // Custom Stop
       const MediaControl(
           androidIcon: 'drawable/ic_action_stop',
@@ -525,6 +619,19 @@ class AudioPlayerHandler extends BaseAudioHandler
   Future<dynamic> customAction(String name, [Map<String, dynamic>? extras]) async {
     if (name == _toggleFavoriteAction) {
       return toggleFavorite();
+    }
+    if (name == _toggleKaraokeAction) {
+      _carKaraoke = !_carKaraoke;
+      if (_carKaraoke) {
+        // mediaItem still holds the untouched item while karaoke was off
+        final item = mediaItem.value;
+        if (item != null) _startCarLyrics(item);
+      } else {
+        _stopCarLyrics();
+      }
+      playbackState.add(playbackState.value
+          .copyWith(controls: _buildControls(_player.playing)));
+      return _carKaraoke;
     }
     return super.customAction(name, extras);
   }
@@ -800,12 +907,45 @@ class AudioPlayerHandler extends BaseAudioHandler
 
   StreamSubscription? _carLyricsSub;
 
-  /// Push the current lyric line into the MediaItem artist field, so that
-  /// Android Auto (which only shows MediaMetadata) displays it.
+  // Karaoke mode on the car display: lyric line in the title (big), song title below
+  bool _carKaraoke = false;
+  // Untouched item of the track whose lyrics are being shown, and its current line
+  MediaItem? _carBaseItem;
+  String _carLyricLine = '';
+
+  /// Publish the current item with the lyric line as title and "artist - title"
+  /// as subtitle (karaoke mode). Everything else (cover, ...) is left untouched.
+  void _publishCarLyric() {
+    final base = _carBaseItem;
+    if (base == null || mediaItem.value?.id != base.id) return;
+    final line = _carLyricLine.isEmpty ? '♪' : _carLyricLine;
+    final artist = base.artist?.trim() ?? '';
+    final subtitle = artist.isEmpty ? base.title : '$artist - ${base.title}';
+    mediaItem.add(base.copyWith(
+        title: line,
+        displayTitle: line,
+        artist: subtitle,
+        displaySubtitle: subtitle));
+  }
+
+  /// Stop showing lyrics and give the car the original item back.
+  void _stopCarLyrics() {
+    _carLyricsSub?.cancel();
+    _carLyricsSub = null;
+    final base = _carBaseItem;
+    _carBaseItem = null;
+    _carLyricLine = '';
+    if (base != null && mediaItem.value?.id == base.id) mediaItem.add(base);
+  }
+
+  /// In karaoke mode, push the current lyric line into the MediaItem title so
+  /// that Android Auto (which only shows MediaMetadata) displays it big.
   Future<void> _startCarLyrics(MediaItem item) async {
     _carLyricsSub?.cancel();
     _carLyricsSub = null;
-    if (!settings.carLyrics) return;
+    _carBaseItem = null;
+    _carLyricLine = '';
+    if (!settings.carLyrics || !_carKaraoke) return;
 
     Lyrics lyrics;
     try {
@@ -814,19 +954,18 @@ class AudioPlayerHandler extends BaseAudioHandler
       Logger.root.warning('Car lyrics: failed to load lyrics for ${item.id}: $e');
       return;
     }
-    // Track changed while loading, or no usable synced lyrics
-    if (mediaItem.value?.id != item.id || !lyrics.isSynced()) return;
+    // Track changed while loading, karaoke switched off, or no usable synced lyrics
+    if (!_carKaraoke || mediaItem.value?.id != item.id || !lyrics.isSynced()) return;
 
     final lines = lyrics.syncedLyrics!.where((l) => l.offset != null).toList();
     int lastIndex = -2;
+    _carBaseItem = item;
     _carLyricsSub = _player.positionStream.listen((position) {
       final index = lines.lastIndexWhere((l) => l.offset! <= position);
       if (index == lastIndex) return;
       lastIndex = index;
-      final text = index >= 0 ? (lines[index].text ?? '') : '';
-      mediaItem.add(item.copyWith(
-          artist: text.isEmpty ? item.artist : text,
-          displaySubtitle: text.isEmpty ? item.displaySubtitle : text));
+      _carLyricLine = index >= 0 ? (lines[index].text ?? '') : '';
+      _publishCarLyric();
     });
   }
 

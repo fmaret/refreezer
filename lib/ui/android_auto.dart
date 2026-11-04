@@ -208,6 +208,12 @@ class AndroidAuto {
       await GetIt.I<AudioPlayerHandler>().playFromAlbum(a, a.tracks?[0].id ?? '');
       return;
     }
+    // Play a track from the search screen
+    if (id.startsWith('${prefix}strk')) {
+      await GetIt.I<AudioPlayerHandler>()
+          .playFromSearchResult(id.replaceFirst('${prefix}strk', ''));
+      return;
+    }
     // Play smart track list
     if (id.startsWith('${prefix}stl')) {
       SmartTrackList stl = await deezerAPI.smartTrackList(id.replaceFirst('${prefix}stl', ''));

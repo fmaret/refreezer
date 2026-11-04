@@ -290,9 +290,9 @@ class _AppearanceSettingsState extends State<AppearanceSettings> {
             enabled: false,
           ),
           ListTile(
-            title: Text('Lyrics on car display'.i18n),
+            title: Text('Karaoke button on car display'.i18n),
             subtitle: Text(
-                'Show the current lyric line in the artist field, so Android Auto displays it.'
+                'Add a button to Android Auto that shows the current lyric line as the title.'
                     .i18n),
             leading: const Icon(Icons.directions_car),
             trailing: Switch(
