@@ -114,6 +114,8 @@ class Settings {
   late String font;
   @JsonKey(defaultValue: false)
   late bool lyricsVisualizer;
+  @JsonKey(defaultValue: false)
+  late bool carLyrics;
   @JsonKey(defaultValue: null)
   int? displayMode;
 

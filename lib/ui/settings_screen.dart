@@ -290,6 +290,20 @@ class _AppearanceSettingsState extends State<AppearanceSettings> {
             enabled: false,
           ),
           ListTile(
+            title: Text('Lyrics on car display'.i18n),
+            subtitle: Text(
+                'Show the current lyric line in the artist field, so Android Auto displays it.'
+                    .i18n),
+            leading: const Icon(Icons.directions_car),
+            trailing: Switch(
+              value: settings.carLyrics,
+              onChanged: (bool v) async {
+                setState(() => settings.carLyrics = v);
+                await settings.save();
+              },
+            ),
+          ),
+          ListTile(
             title: Text('Primary color'.i18n),
             leading: const Icon(Icons.format_paint),
             subtitle: Text(

@@ -712,24 +712,11 @@ class _PlaybackControlsState extends State<PlaybackControls> {
           IconButton(
             icon: libraryIcon,
             onPressed: () async {
-              cache.libraryTracks ??= [];
-
-              if (cache.checkTrackFavorite(
-                  Track.fromMediaItem(audioHandler.mediaItem.value!))) {
-                //Remove from library
-                setState(() => cache.libraryTracks
-                    ?.remove(audioHandler.mediaItem.value!.id));
-                await deezerAPI
-                    .removeFavorite(audioHandler.mediaItem.value!.id);
-                await cache.save();
-              } else {
-                //Add
-                setState(() =>
-                    cache.libraryTracks?.add(audioHandler.mediaItem.value!.id));
-                await deezerAPI
-                    .addFavoriteTrack(audioHandler.mediaItem.value!.id);
-                await cache.save();
-              }
+              final future = audioHandler.toggleFavorite();
+              // cache is updated synchronously inside toggleFavorite
+              setState(() {});
+              await future;
+              if (mounted) setState(() {});
             },
           )
         ],

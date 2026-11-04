@@ -151,6 +151,7 @@ class AudioPlayerHandler extends BaseAudioHandler
     }).whereType<MediaItem>().distinct().listen((item) {
       // Change track
       mediaItem.add(item);
+      _startCarLyrics(item);
 
       final int queueIndex = queue.value.indexOf(item);
       final int queueLength = queue.value.length;
@@ -458,6 +459,76 @@ class AudioPlayerHandler extends BaseAudioHandler
         .then((_) => Logger.root.info('audio player initialized!'));
   }
 
+  static const String _toggleFavoriteAction = 'toggleFavorite';
+
+  List<MediaControl> _buildControls(bool playing) {
+    final item = mediaItem.value;
+    final isFavorite =
+        item != null && cache.checkTrackFavorite(Track.fromMediaItem(item));
+    return [
+      MediaControl.skipToPrevious,
+      if (playing) MediaControl.pause else MediaControl.play,
+      MediaControl.skipToNext,
+      // Love / unlove current track (shown as custom action in Android Auto)
+      MediaControl.custom(
+          androidIcon: isFavorite
+              ? 'drawable/ic_favorite'
+              : 'drawable/ic_favorite_border',
+          label: isFavorite ? 'Unlove'.i18n : 'Love'.i18n,
+          name: _toggleFavoriteAction),
+      // Custom Stop
+      const MediaControl(
+          androidIcon: 'drawable/ic_action_stop',
+          label: 'stop',
+          action: MediaAction.stop),
+    ];
+  }
+
+  /// Add or remove the current track from favorites.
+  /// Returns the new favorite state.
+  Future<bool> toggleFavorite() async {
+    final item = mediaItem.value;
+    if (item == null) return false;
+    cache.libraryTracks ??= [];
+    final wasFavorite = cache.checkTrackFavorite(Track.fromMediaItem(item));
+    if (wasFavorite) {
+      cache.libraryTracks?.remove(item.id);
+    } else {
+      cache.libraryTracks?.add(item.id);
+    }
+    // Refresh the button right away, then sync with Deezer
+    playbackState.add(playbackState.value
+        .copyWith(controls: _buildControls(_player.playing)));
+    try {
+      if (wasFavorite) {
+        await deezerAPI.removeFavorite(item.id);
+      } else {
+        await deezerAPI.addFavoriteTrack(item.id);
+      }
+      await cache.save();
+    } catch (e) {
+      Logger.root.warning('Failed to toggle favorite for ${item.id}: $e');
+      // Roll back
+      if (wasFavorite) {
+        cache.libraryTracks?.add(item.id);
+      } else {
+        cache.libraryTracks?.remove(item.id);
+      }
+      playbackState.add(playbackState.value
+          .copyWith(controls: _buildControls(_player.playing)));
+      return wasFavorite;
+    }
+    return !wasFavorite;
+  }
+
+  @override
+  Future<dynamic> customAction(String name, [Map<String, dynamic>? extras]) async {
+    if (name == _toggleFavoriteAction) {
+      return toggleFavorite();
+    }
+    return super.customAction(name, extras);
+  }
+
   /// Broadcasts the current state to all clients.
   void _broadcastState(PlaybackEvent event) {
     final playing = _player.playing;
@@ -466,16 +537,7 @@ class AudioPlayerHandler extends BaseAudioHandler
 
     playbackState.add(
       playbackState.value.copyWith(
-        controls: [
-          MediaControl.skipToPrevious,
-          if (playing) MediaControl.pause else MediaControl.play,
-          MediaControl.skipToNext,
-          // Custom Stop
-          const MediaControl(
-              androidIcon: 'drawable/ic_action_stop',
-              label: 'stop',
-              action: MediaAction.stop),
-        ],
+        controls: _buildControls(playing),
         systemActions: const {
           MediaAction.seek,
           MediaAction.seekForward,
@@ -736,7 +798,40 @@ class AudioPlayerHandler extends BaseAudioHandler
     await _playerInitializedCompleter.future;
   }
 
+  StreamSubscription? _carLyricsSub;
+
+  /// Push the current lyric line into the MediaItem artist field, so that
+  /// Android Auto (which only shows MediaMetadata) displays it.
+  Future<void> _startCarLyrics(MediaItem item) async {
+    _carLyricsSub?.cancel();
+    _carLyricsSub = null;
+    if (!settings.carLyrics) return;
+
+    Lyrics lyrics;
+    try {
+      lyrics = await deezerAPI.lyrics(item.id);
+    } catch (e) {
+      Logger.root.warning('Car lyrics: failed to load lyrics for ${item.id}: $e');
+      return;
+    }
+    // Track changed while loading, or no usable synced lyrics
+    if (mediaItem.value?.id != item.id || !lyrics.isSynced()) return;
+
+    final lines = lyrics.syncedLyrics!.where((l) => l.offset != null).toList();
+    int lastIndex = -2;
+    _carLyricsSub = _player.positionStream.listen((position) {
+      final index = lines.lastIndexWhere((l) => l.offset! <= position);
+      if (index == lastIndex) return;
+      lastIndex = index;
+      final text = index >= 0 ? (lines[index].text ?? '') : '';
+      mediaItem.add(item.copyWith(
+          artist: text.isEmpty ? item.artist : text,
+          displaySubtitle: text.isEmpty ? item.displaySubtitle : text));
+    });
+  }
+
   Future dispose() async {
+    _carLyricsSub?.cancel();
     _queueStateSub?.cancel();
     _mediaItemSub?.cancel();
     await stop();
