@@ -542,7 +542,8 @@ class LyricsIconButton extends StatelessWidget {
     Track track =
         Track.fromMediaItem(GetIt.I<AudioPlayerHandler>().mediaItem.value!);
 
-    bool isEnabled = (track.lyrics?.id ?? '0') != '0';
+    // Always enabled: Deezer may report no lyrics (id 0), but the LRCLIB fallback can still find some
+    bool isEnabled = true;
 
     return Opacity(
       opacity: isEnabled

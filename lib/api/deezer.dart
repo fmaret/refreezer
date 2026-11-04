@@ -355,8 +355,76 @@ class DeezerAPI {
       return lyricsFromLegacy;
     }
 
+    // Fallback to LRCLIB (third party, community lyrics)
+    try {
+      Lyrics lyricsFromLrclib = await lyricsLrclib(trackId);
+      if (lyricsFromLrclib.isLoaded()) {
+        return lyricsFromLrclib;
+      }
+    } catch (e) {
+      Logger.root.warning('LRCLIB lyrics lookup failed for track $trackId: $e');
+    }
+
     // No lyrics found, prefer to use pipe api error message
     return lyricsFromPipeApi;
+  }
+
+  //Get lyrics from LRCLIB (https://lrclib.net) using the track metadata
+  Future<Lyrics> lyricsLrclib(String trackId) async {
+    Track track = await this.track(trackId);
+    if (track.title == null || track.artists?.isNotEmpty != true) {
+      return Lyrics.error('Missing track metadata');
+    }
+
+    Map<String, String> query = {
+      'track_name': track.title!,
+      'artist_name': track.artists!.first.name ?? '',
+    };
+    if (track.album?.title != null) query['album_name'] = track.album!.title!;
+    if (track.duration != null) query['duration'] = track.duration!.inSeconds.toString();
+
+    Map<String, String> headers = {'User-Agent': 'ReFreezer (https://github.com/DJDoubleD/ReFreezer)'};
+
+    // Exact match first, then fuzzy search without album/duration
+    http.Response res = await http.get(Uri.https('lrclib.net', '/api/get', query), headers: headers);
+    Map? hit;
+    if (res.statusCode == 200) {
+      hit = jsonDecode(res.body);
+    } else {
+      res = await http.get(
+          Uri.https('lrclib.net', '/api/search', {'track_name': query['track_name']!, 'artist_name': query['artist_name']!}),
+          headers: headers);
+      if (res.statusCode == 200) {
+        List results = jsonDecode(res.body);
+        hit = results.cast<Map?>().firstWhere((r) => r?['syncedLyrics'] != null, orElse: () => results.isEmpty ? null : results.first);
+      }
+    }
+    if (hit == null) return Lyrics.error('Not found on LRCLIB');
+
+    return Lyrics(
+      syncedLyrics: _parseLrc(hit['syncedLyrics']),
+      unsyncedLyrics: hit['plainLyrics'],
+    );
+  }
+
+  //Parse LRC text ("[mm:ss.xx] line") into synchronized lines
+  List<SynchronizedLyric> _parseLrc(String? lrc) {
+    if (lrc == null) return [];
+    final RegExp lineRegex = RegExp(r'^\[(\d+):(\d+)(?:[.:](\d+))?\](.*)$');
+    List<SynchronizedLyric> lines = [];
+    for (String raw in lrc.split('\n')) {
+      Match? m = lineRegex.firstMatch(raw.trim());
+      if (m == null) continue;
+      String frac = (m.group(3) ?? '0').padRight(3, '0').substring(0, 3);
+      Duration offset = Duration(
+          minutes: int.parse(m.group(1)!), seconds: int.parse(m.group(2)!), milliseconds: int.parse(frac));
+      lines.add(SynchronizedLyric(offset: offset, text: m.group(4)!.trim(), lrcTimestamp: '[${m.group(1)}:${m.group(2)}.${m.group(3) ?? '00'}]'));
+    }
+    for (int i = 0; i < lines.length - 1; i++) {
+      lines[i].duration = lines[i + 1].offset! - lines[i].offset!;
+    }
+    if (lines.isNotEmpty) lines.last.duration = const Duration(seconds: 5);
+    return lines;
   }
 
   //Get lyrics by track id from legacy GW api
