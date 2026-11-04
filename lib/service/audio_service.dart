@@ -389,12 +389,14 @@ class AudioPlayerHandler extends BaseAudioHandler
 
   @override
   Future<void> onTaskRemoved() async {
-    dispose();
+    // Don't dispose the player: the process can outlive the task, and the
+    // handler (with its player) is reused when the app is reopened.
+    await stop();
   }
 
   @override
   Future<void> onNotificationDeleted() async {
-    dispose();
+    await stop();
   }
 
   @override
