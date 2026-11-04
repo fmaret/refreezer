@@ -188,6 +188,19 @@
             android:name="flutterEmbedding"
             android:value="2" />
 
+        <!-- Voice commands ("play X on Flowzer"): forwarded to the media session -->
+        <activity
+            android:name=".VoiceSearchActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.media.action.MEDIA_PLAY_FROM_SEARCH" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
         <service android:name="com.ryanheise.audioservice.AudioService"
                 android:foregroundServiceType="mediaPlayback"
                 android:exported="true" tools:ignore="Instantiatable">

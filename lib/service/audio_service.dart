@@ -281,8 +281,15 @@ class AudioPlayerHandler extends BaseAudioHandler
   Future<void> playFromSearch(String query, [Map<String, dynamic>? extras]) async {
     final q = query.trim();
     try {
-      if (q.isEmpty) {
+      final spoken = _normalizeVoice(q);
+      // "play some music", "play my flow"
+      if (spoken.isEmpty || _isFlowRequest(spoken)) {
         await _androidAuto.playItem('${AndroidAuto.prefix}flow');
+        return;
+      }
+      // "play my favorites / loved tracks / coups de coeur"
+      if (_isFavoritesRequest(spoken)) {
+        await _androidAuto.playItem('${AndroidAuto.prefix}tracks');
         return;
       }
       final results = await deezerAPI.search(q);
@@ -321,6 +328,27 @@ class AudioPlayerHandler extends BaseAudioHandler
       Logger.root.severe('Voice search "$q" failed', e, st);
     }
   }
+
+  /// Lowercase, strip accents and punctuation, drop leading possessives
+  /// ("mon", "mes", "my", ...) so voice requests can be matched loosely.
+  static String _normalizeVoice(String input) {
+    const from = 'àâäéèêëîïôöùûüç';
+    const to = 'aaaeeeeiioouuuc';
+    var s = input.toLowerCase().replaceAll('œ', 'oe');
+    for (var i = 0; i < from.length; i++) {
+      s = s.replaceAll(from[i], to[i]);
+    }
+    s = s.replaceAll(RegExp(r"[^a-z0-9 ]"), ' ');
+    s = s.replaceAll(RegExp(r'\s+'), ' ').trim();
+    return s.replaceFirst(RegExp(r'^(mon|ma|mes|le|la|les|my|the|play|joue|mets|met) '), '').trim();
+  }
+
+  static bool _isFlowRequest(String spoken) =>
+      spoken == 'flow' || spoken == 'mon flow' || spoken == 'deezer flow';
+
+  static bool _isFavoritesRequest(String spoken) => RegExp(
+          r'(coups? de coeur|favoris|favorites?|loved tracks|liked( songs| tracks)?|titres? likes?|morceaux likes?|titres? aimes?|likes)')
+      .hasMatch(spoken);
 
   /// Search screen of Android Auto (search button with voice input).
   @override
