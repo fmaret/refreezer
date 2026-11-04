@@ -4,7 +4,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:get_it/get_it.dart';
 import 'package:logging/logging.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 
+import '../api/cache.dart';
 import '../api/deezer.dart';
 import '../api/definitions.dart';
 import '../service/audio_service.dart';
@@ -33,7 +35,27 @@ class _LyricsScreenState extends State<LyricsScreen> {
   Timer? _timer;
   final ScrollController _controller = ScrollController();
   StreamSubscription? _mediaItemSub;
-  final double height = 90;
+  //Karaoke mode: only the lyrics, full screen and big
+  bool _karaoke = false;
+  double get height => _karaoke ? 170 : 90;
+
+  void _toggleKaraoke() {
+    setState(() => _karaoke = !_karaoke);
+    //Row height changed: force a re-scroll on the next tick
+    _prevIndex = -1;
+    if (_karaoke) {
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+      WakelockPlus.enable();
+    } else {
+      _leaveKaraokeSystemUi();
+    }
+  }
+
+  void _leaveKaraokeSystemUi() {
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.manual, overlays: SystemUiOverlay.values);
+    //Don't undo a wakelock the user enabled from the player menu
+    if (!cache.wakelock) WakelockPlus.disable();
+  }
 
   @override
   void initState() {
@@ -104,9 +126,11 @@ class _LyricsScreenState extends State<LyricsScreen> {
       if (_currentIndex <= 0) return;
       if (_prevIndex == _currentIndex) return;
       _prevIndex = _currentIndex;
+      if (!_controller.hasClients) return;
       _controller.animateTo(
-          //Lyric height, screen height, appbar height
-          (height * _currentIndex) - (MediaQuery.of(context).size.height / 2) + (height / 2) + 56,
+          //Lyric height, screen height, appbar height (none in karaoke mode)
+          ((height * _currentIndex) - (MediaQuery.of(context).size.height / 2) + (height / 2) + (_karaoke ? 0 : 56))
+              .clamp(0.0, _controller.position.maxScrollExtent),
           duration: const Duration(milliseconds: 250),
           curve: Curves.ease);
     });
@@ -117,6 +141,7 @@ class _LyricsScreenState extends State<LyricsScreen> {
     _timer?.cancel();
     _mediaItemSub?.cancel();
     _controller.dispose();
+    if (_karaoke) _leaveKaraokeSystemUi();
     //Stop visualizer
     if (settings.lyricsVisualizer) {
       GetIt.I<AudioPlayerHandler>().stopVisualizer();
@@ -130,12 +155,32 @@ class _LyricsScreenState extends State<LyricsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-        appBar: FreezerAppBar(appBarTitle),
+    final Color? baseTextColor = Theme.of(context).textTheme.bodyLarge?.color;
+    final double textMaxWidth = MediaQuery.of(context).size.width - 32;
+
+    return PopScope(
+      //Back leaves karaoke mode first
+      canPop: !_karaoke,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop && _karaoke) _toggleKaraoke();
+      },
+      child: Scaffold(
+        appBar: _karaoke
+            ? null
+            : FreezerAppBar(
+                appBarTitle,
+                actions: [
+                  IconButton(
+                    icon: const Icon(Icons.mic_external_on),
+                    tooltip: 'Karaoke mode'.i18n,
+                    onPressed: _toggleKaraoke,
+                  ),
+                ],
+              ),
         body: Stack(
           children: [
             //Visualizer
-            if (settings.lyricsVisualizer)
+            if (settings.lyricsVisualizer && !_karaoke)
               Align(
                 alignment: Alignment.bottomCenter,
                 child: StreamBuilder(
@@ -160,7 +205,7 @@ class _LyricsScreenState extends State<LyricsScreen> {
 
             //Lyrics
             Padding(
-              padding: EdgeInsets.fromLTRB(0, 0, 0, settings.lyricsVisualizer ? 100 : 0),
+              padding: EdgeInsets.fromLTRB(0, 0, 0, (settings.lyricsVisualizer && !_karaoke) ? 100 : 0),
               child: ListView(
                 controller: _controller,
                 children: [
@@ -185,7 +230,9 @@ class _LyricsScreenState extends State<LyricsScreen> {
                           child: Container(
                               decoration: BoxDecoration(
                                 borderRadius: BorderRadius.circular(8.0),
-                                color: (_currentIndex == i) ? Colors.grey.withOpacity(0.25) : Colors.transparent,
+                                color: (_currentIndex == i && !_karaoke)
+                                    ? Colors.grey.withValues(alpha: 0.25)
+                                    : Colors.transparent,
                               ),
                               height: height,
                               child: Center(
@@ -196,14 +243,33 @@ class _LyricsScreenState extends State<LyricsScreen> {
                                       GetIt.I<AudioPlayerHandler>().seek(offset);
                                     }
                                   },
-                                  child: Text(
-                                    lyrics!.syncedLyrics![i].text ?? '',
-                                    textAlign: TextAlign.center,
-                                    style: TextStyle(
-                                      fontSize: 26.0,
-                                      fontWeight: (_currentIndex == i) ? FontWeight.bold : FontWeight.normal,
-                                    ),
-                                  ),
+                                  child: _karaoke
+                                      //Big text, current line emphasized; long lines shrink to fit the row
+                                      ? FittedBox(
+                                          fit: BoxFit.scaleDown,
+                                          child: ConstrainedBox(
+                                            constraints: BoxConstraints(maxWidth: textMaxWidth),
+                                            child: Text(
+                                              lyrics!.syncedLyrics![i].text ?? '',
+                                              textAlign: TextAlign.center,
+                                              style: TextStyle(
+                                                fontSize: (_currentIndex == i) ? 48.0 : 38.0,
+                                                fontWeight: FontWeight.bold,
+                                                color: (_currentIndex == i)
+                                                    ? baseTextColor
+                                                    : baseTextColor?.withValues(alpha: 0.4),
+                                              ),
+                                            ),
+                                          ),
+                                        )
+                                      : Text(
+                                          lyrics!.syncedLyrics![i].text ?? '',
+                                          textAlign: TextAlign.center,
+                                          style: TextStyle(
+                                            fontSize: 26.0,
+                                            fontWeight: (_currentIndex == i) ? FontWeight.bold : FontWeight.normal,
+                                          ),
+                                        ),
                                 ),
                               )));
                     }),
@@ -220,8 +286,9 @@ class _LyricsScreenState extends State<LyricsScreen> {
                           child: Text(
                             lyrics!.unsyncedLyrics!,
                             textAlign: TextAlign.center,
-                            style: const TextStyle(
-                              fontSize: 26.0,
+                            style: TextStyle(
+                              fontSize: _karaoke ? 36.0 : 26.0,
+                              fontWeight: _karaoke ? FontWeight.bold : FontWeight.normal,
                             ),
                           ),
                         ),
@@ -229,8 +296,24 @@ class _LyricsScreenState extends State<LyricsScreen> {
                     ),
                 ],
               ),
-            )
+            ),
+
+            //Leave karaoke mode (the app bar is hidden)
+            if (_karaoke)
+              Positioned(
+                top: 0,
+                right: 0,
+                child: SafeArea(
+                  child: IconButton(
+                    icon: Icon(Icons.fullscreen_exit, color: baseTextColor?.withValues(alpha: 0.6)),
+                    tooltip: 'Karaoke mode'.i18n,
+                    onPressed: _toggleKaraoke,
+                  ),
+                ),
+              ),
           ],
-        ));
+        ),
+      ),
+    );
   }
 }
